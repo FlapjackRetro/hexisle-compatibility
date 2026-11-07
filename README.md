@@ -10,6 +10,8 @@ on modern Windows. You need your own copy of the game disc; no game files are in
 | Installer not needed | Game files live in the Mac Cider wrapper on the hybrid disc | `install_hexisle.bat` copies them to `C:\Cosmo` |
 | ~0.25 fps | Main loop calls `0x443D20` every frame; with no joystick open it re-runs `DirectInput8Create` + `EnumDevices(GAMECTRL)` (and leaks the objects) — seconds per frame on HID-heavy PCs | `tools/patch_plasma.ps1` / `.py`: `je`→`jmp` at file offset `0x43D2D` (startup enumeration kept) |
 | No frame cap / VSync control | Engine has `Graphics.EnableVSync` but no limiter | `hexfix` d3d9.dll proxy (optional, off by default) |
+| Broken view on ultrawide (21:9, 32:9) | Horizontal FOV is `52.5° × aspect` (−3.3° above 80°) at `0x443293`/`0x4F7242`: 90° at 16:9 but ~183° at 32:9 | `hexfix` `WidescreenFOV=1`: vanilla up to 16:9, Hor+ beyond (21:9 ≈ 106°, 32:9 ≈ 127°) |
+| Glow turns the scene white at 5120×1440 | Under investigation | Untick **Glow** in Settings → Video for now |
 
 ## Install
 1. Copy the disc contents into this folder (so `plInstaller.exe` and `Cosmic Osmo's Hex Isle.app\` sit next to this README).
@@ -41,13 +43,21 @@ repository** — use the one printed in your own copy. Alternatives:
 Note that the game does not read `InstallPath`, so the entry works regardless of where the game is installed.
 
 ## hexfix (d3d9.dll proxy)
-Loaded from the game folder in place of the system `d3d9.dll`; forwards to `System32\d3d9.dll` and hooks
-`IDirect3D9::CreateDevice`, `IDirect3DDevice9::Reset` and `::Present`. Settings in `hexfix.ini`:
+Loaded from the game folder in place of the system `d3d9.dll` (the game `LoadLibrary`s `D3D9.DLL`); forwards to
+`System32\d3d9.dll`. It hooks `IDirect3D9::CreateDevice` and `IDirect3DDevice9::Reset` (VSync override), and
+redirects the game's single `IDirect3DDevice9::Present` call site (`0x4F4285`) — the D3D9 runtime can swap a
+device's vtable at runtime (observed when a level loads), so vtable hooks on `Present` alone are not reliable.
+The FOV fix patches two call sites in `plasma.exe` at load time. All patches verify the original bytes first.
 
-| Key | Default | Meaning |
-|---|---|---|
-| `FrameRateLimit` | `0` | FPS cap, 0 = off (vanilla) |
-| `VSync` | `-1` | -1 = game's setting (vanilla), 0 = force off, 1 = force on |
+Settings in `hexfix.ini`:
+
+| Section | Key | Default | Meaning |
+|---|---|---|---|
+| `Display` | `FrameRateLimit` | `0` | FPS cap, 0 = off (vanilla) |
+| `Display` | `VSync` | `-1` | -1 = game's setting (vanilla), 0 = force off, 1 = force on |
+| `Display` | `WidescreenFOV` | `1` | 1 = Hor+ FOV wider than 16:9 (unchanged at ≤16:9), 0 = original formula |
+| `Debug` | `ShowFPS` | `0` | 1 = FPS counter (green digits, top-left) |
+| `Debug` | `Log` | `0` | 1 = write `hexfix.log` next to the game |
 
 Build: `hexfix\build.bat` (MSVC x86 Native Tools prompt) or `hexfix/build.sh` (clang-cl + lld-link, no SDK needed).
 
@@ -56,4 +66,8 @@ Build: `hexfix\build.bat` (MSVC x86 Native Tools prompt) or `hexfix/build.sh` (c
 * `init\*.ini` are encrypted: header `u32 magic 0x0D874288, u32 plaintext size`, then AES-128-ECB.
   Key + magic are stored XOR `0xCF092676` in `plasma.exe` at VA `0x9A1D8C`. `tools/hexini.py d|e <in> <out>`.
 * CD-key check lives at `0x44B130`.
+* Camera FOV globals: FOVw `0x9A09E4` (70.0), FOVh `0x9A09E8` (52.5); setter `0x5CC720`.
+* `Python\python.pak`: same AES layer as the INIs; then `u32 count`, entries `u16 len, obfuscated name, u32 offset`,
+  each module = `u32 size` + marshalled Python 2.x code object. Video options live in `xAVSettings.py`
+  (windowed list `kWindowedResolutions`, fullscreen list from `PtGetSupportedDisplayModes`).
 * Retail `plasma.exe` SHA-256: `517dd45e220e2c1eba702038edaeb35985b93a7fcd1760a7b7d0a700651fc47e`.

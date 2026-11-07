@@ -14,3 +14,5 @@ GetPrivateProfileIntW@16
 DisableThreadLibraryCalls@4
 Sleep@4
 OutputDebugStringA@4
+CreateFileW@28
+WriteFile@20

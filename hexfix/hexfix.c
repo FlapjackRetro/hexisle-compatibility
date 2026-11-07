@@ -35,6 +35,8 @@ typedef i32 (WINAPI *WNDPROC_t)(HANDLE, u32, u32, i32);
 IMP i32     WINAPI CallWindowProcA(WNDPROC_t, HANDLE, u32, u32, i32);
 
 int _fltused = 0x9875;  /* no CRT: satisfy float-usage marker */
+void *_ReturnAddress(void);
+#pragma intrinsic(_ReturnAddress)
 static HMODULE g_self, g_real;
 static i32 g_fpsLimit = 0;   /* 0 = off (vanilla) */
 static i32 g_vsync = -1;     /* -1 = game decides (vanilla), 0 = force off, 1 = force on */
@@ -48,9 +50,18 @@ static HANDLE g_timer;
 
 /* 64-bit unsigned divide without CRT helpers */
 static u64 udiv64(u64 n, u64 d) {
-    u64 q = 0, r = 0; int i;
-    for (i = 63; i >= 0; --i) { r = (r << 1) | ((n >> i) & 1); if (r >= d) { r -= d; q |= (u64)1 << i; } }
-    return q;
+    /* restoring division on 32-bit halves: no CRT helpers (__aulldiv/__aullshr) with MSVC or clang */
+    u32 nh = (u32)(n >> 32), nl = (u32)n, dh = (u32)(d >> 32), dl = (u32)d;
+    u32 qh = 0, ql = 0, rh = 0, rl = 0; int i;
+    for (i = 63; i >= 0; --i) {
+        u32 bit = i >= 32 ? (nh >> (i - 32)) & 1 : (nl >> i) & 1;
+        rh = (rh << 1) | (rl >> 31); rl = (rl << 1) | bit;           /* r = (r << 1) | bit */
+        if (rh > dh || (rh == dh && rl >= dl)) {                     /* r >= d */
+            u32 borrow = rl < dl; rl -= dl; rh -= dh + borrow;
+            if (i >= 32) qh |= 1u << (i - 32); else ql |= 1u << i;
+        }
+    }
+    return ((u64)qh << 32) | ql;
 }
 
 static void wcopy(WCHAR *dst, const WCHAR *src) { while ((*dst++ = *src++)) ; }
@@ -144,12 +155,12 @@ static HRESULT WINAPI my_CreateTexture(void *dev, u32 w, u32 h, u32 lv, u32 usag
     HRESULT hr = o_CreateTexture(dev, w, h, lv, usage, fmt, pool, out, sh);
     if ((usage & 1 /*RENDERTARGET*/) || hr < 0) { static int k; if (k < 80) { k++;
         logs(hr < 0 ? "CreateTexture FAILED" : "CreateTexture RT"); logd(" w", w); logd("  h", h); logx("  fmt", fmt); logx("  usage", usage); logx("  hr", (u32)hr);
-        logx("  caller", (u32)__builtin_return_address(0)); } }
+        logx("  caller", (u32)_ReturnAddress()); } }
     return hr;
 }
 static HRESULT WINAPI my_CreateRT(void *dev, u32 w, u32 h, u32 fmt, u32 ms, u32 msq, BOOL lock, void **out, HANDLE *sh) {
     HRESULT hr = o_CreateRT(dev, w, h, fmt, ms, msq, lock, out, sh);
-    { static int k; if (k < 40) { k++; logs("CreateRenderTarget"); logd(" w", w); logd("  h", h); logx("  fmt", fmt); logx("  hr", (u32)hr); logx("  caller", (u32)__builtin_return_address(0)); } }
+    { static int k; if (k < 40) { k++; logs("CreateRenderTarget"); logd(" w", w); logd("  h", h); logx("  fmt", fmt); logx("  hr", (u32)hr); logx("  caller", (u32)_ReturnAddress()); } }
     return hr;
 }
 
@@ -199,8 +210,8 @@ static void draw_fps(void *dev, void *swap) {
     QueryPerformanceCounter(&now);
     if (!g_fpsT0) g_fpsT0 = now;
     g_fpsFrames++;
-    if (now - g_fpsT0 >= g_freq / 2) {                       /* update twice a second */
-        g_fpsShown = (u32)udiv64((u64)g_fpsFrames * (u64)g_freq + (u64)(now - g_fpsT0) / 2, (u64)(now - g_fpsT0));
+    if (now - g_fpsT0 >= (g_freq >> 1)) {                       /* update twice a second */
+        g_fpsShown = (u32)udiv64((u64)g_fpsFrames * (u64)g_freq + ((u64)(now - g_fpsT0) >> 1), (u64)(now - g_fpsT0));
         g_fpsFrames = 0; g_fpsT0 = now;
     }
     { HRESULT hr = swap ? ((SwapGetBB_t)(*(void***)swap)[5])(swap, 0, 0, &bb)
@@ -336,8 +347,8 @@ static float fix_fovw(float w, float aspect) {
     t = x87_tan(vanilla_w(h, a169) * 0.5f * DEG2RAD) / a169;  /* effective vertical half-tangent */
     return 2.f * x87_atan(t * aspect) * RAD2DEG;
 }
-static void __cdecl fixA(float *pw, float aspect) { u32 o = (u32)(*pw * 10.f); *pw = fix_fovw(*pw, aspect); logd("FOV A in x10", o); logd("FOV A out x10", (u32)(*pw * 10.f)); }
-static void __cdecl fixB(float *pw, i32 w, i32 h) { u32 o = (u32)(*pw * 10.f); if (h > 0) *pw = fix_fovw(*pw, (float)w / (float)h); logd("FOV B w", (u32)w); logd("FOV B h", (u32)h); logd("FOV B in x10", o); logd("FOV B out x10", (u32)(*pw * 10.f)); }
+static void __cdecl fixA(float *pw, float aspect) { u32 o = (u32)(i32)(*pw * 10.f); *pw = fix_fovw(*pw, aspect); logd("FOV A in x10", o); logd("FOV A out x10", (u32)(i32)(*pw * 10.f)); }
+static void __cdecl fixB(float *pw, i32 w, i32 h) { u32 o = (u32)(i32)(*pw * 10.f); if (h > 0) *pw = fix_fovw(*pw, (float)w / (float)h); logd("FOV B w", (u32)w); logd("FOV B h", (u32)h); logd("FOV B in x10", o); logd("FOV B out x10", (u32)(i32)(*pw * 10.f)); }
 
 /* site A 0x4432D0 (startup): replaces `mov ecx,[0x9A09E8]`; fovW at [ebp-0x194], aspect float at [ebp-0x18C] */
 static __declspec(naked) void stubA(void) { __asm {
@@ -381,7 +392,7 @@ static void __cdecl fix_gui(unsigned char *rmod) {
         w = 2.f * x87_atan(t * a) * RAD2DEG;
     }
     *(float*)(rmod + 0x44) = w;
-    { static int k; if (k < 12) { k++; logd("GUI dialog fovY x10", (u32)(fy * 10.f)); logd("  aspect x1000", (u32)(a * 1000.f)); logd("  fovX x10", (u32)(w * 10.f)); } }
+    { static int k; if (k < 12) { k++; logd("GUI dialog fovY x10", (u32)(i32)(fy * 10.f)); logd("  aspect x1000", (u32)(i32)(a * 1000.f)); logd("  fovX x10", (u32)(i32)(w * 10.f)); } }
 }
 /* replaces `fld [eax+48h]; mov edx,[0A05960h]; fmul [edx+3Ch]; fstp [eax+44h]` at 0x5EAEB7 (15 bytes) */
 static __declspec(naked) void stubGui(void) { __asm {
@@ -428,7 +439,7 @@ static void install_fov_fix(void) {
  * if absent it calls 0x440C90 (write default graphics.ini) at 0x441321. Log the list when that happens. */
 typedef struct { u32 flags; u16 w, h; u32 depth; } MODEREC;   /* 0x20-byte entries, first 12 bytes */
 static void __cdecl log_modecheck(u32 ebp) {
-    u32 n = *(u16*)(ebp - 0x1E8), i; unsigned char *arr = *(unsigned char**)(ebp - 0x1E4);
+    u32 n = *(u16*)(ebp - 0x1E8);
     logs("Fullscreen mode not found in device list -> game resets graphics.ini to defaults\r\n");
     logd("  wanted w", *(u32*)0x991424); logd("  wanted h", *(u32*)0x991428); logd("  wanted depth", *(u32*)0x991430);
     logd("  device modes", n);

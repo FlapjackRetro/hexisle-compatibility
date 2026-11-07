@@ -23,13 +23,26 @@ IMP void    WINAPI Sleep(u32);
 IMP void    WINAPI OutputDebugStringA(const char*);
 IMP HANDLE  WINAPI CreateFileW(const WCHAR*, u32, u32, PVOID, u32, u32, HANDLE);
 IMP BOOL    WINAPI WriteFile(HANDLE, const void*, u32, u32*, PVOID);
+typedef struct { i32 x, y; } POINT;
+IMP BOOL    WINAPI GetCursorPos(POINT*);
+IMP BOOL    WINAPI ScreenToClient(HANDLE, POINT*);
+IMP BOOL    WINAPI SetCursorPos(i32, i32);
+typedef struct { u16 usUsagePage, usUsage; u32 dwFlags; HANDLE hwndTarget; } RAWINPUTDEVICE;
+IMP BOOL    WINAPI RegisterRawInputDevices(const RAWINPUTDEVICE*, u32, u32);
+IMP u32     WINAPI GetRawInputData(HANDLE, u32, void*, u32*, u32);
+IMP i32     WINAPI SetWindowLongA(HANDLE, i32, i32);
+typedef i32 (WINAPI *WNDPROC_t)(HANDLE, u32, u32, i32);
+IMP i32     WINAPI CallWindowProcA(WNDPROC_t, HANDLE, u32, u32, i32);
 
 int _fltused = 0x9875;  /* no CRT: satisfy float-usage marker */
 static HMODULE g_self, g_real;
 static i32 g_fpsLimit = 0;   /* 0 = off (vanilla) */
 static i32 g_vsync = -1;     /* -1 = game decides (vanilla), 0 = force off, 1 = force on */
 static i32 g_showfps = 0;    /* 1 = draw an FPS counter in the top-left corner */
-static i32 g_wsfov = 1;      /* 1 = Hor+ FOV beyond 16:9 (fixes >180 deg FOV on ultrawide), 0 = vanilla */
+static i32 g_wsfov = 1;
+static i32 g_modefix = 1;
+static i32 g_mousefix = 1;
+static i32 g_scaletext = 1, g_textref = 768;  /* resolution-independent GUI text boxes */  /* 1 = mouse deltas from the real cursor position (fixes camera jumps) */   /* 1 = keep wide fullscreen modes (e.g. 5120x1440) across restarts */      /* 1 = Hor+ FOV beyond 16:9 (fixes >180 deg FOV on ultrawide), 0 = vanilla */
 static i64 g_freq, g_period, g_next;
 static HANDLE g_timer;
 
@@ -73,6 +86,11 @@ static void load_config(void) {
     g_vsync    = (i32)GetPrivateProfileIntW(L"Display", L"VSync", -1, path);
     g_wsfov    = (i32)GetPrivateProfileIntW(L"Display", L"WidescreenFOV", 1, path);
     g_showfps  = (i32)GetPrivateProfileIntW(L"Debug", L"ShowFPS", 0, path);
+    g_modefix  = (i32)GetPrivateProfileIntW(L"Display", L"KeepWideModes", 1, path);
+    g_mousefix = (i32)GetPrivateProfileIntW(L"Input", L"MouseFix", 1, path);
+    g_scaletext = (i32)GetPrivateProfileIntW(L"Display", L"ScaleText", 1, path);
+    g_textref  = (i32)GetPrivateProfileIntW(L"Display", L"TextReferenceHeight", 768, path);
+    if (g_textref < 240) g_textref = 240; if (g_textref > 4320) g_textref = 4320;
     QueryPerformanceFrequency(&g_freq);
     if (g_fpsLimit < 0) g_fpsLimit = 0;
     logd("FrameRateLimit", (u32)g_fpsLimit); logx("VSync", (u32)g_vsync); logd("WidescreenFOV", (u32)g_wsfov); logd("ShowFPS", (u32)g_showfps);
@@ -116,6 +134,24 @@ typedef HRESULT (WINAPI *CreateDevice_t)(void*, u32, u32, HANDLE, u32, PP*, void
 typedef HRESULT (WINAPI *Reset_t)(void*, PP*);
 typedef HRESULT (WINAPI *Present_t)(void*, const void*, const void*, HANDLE, const void*);
 static CreateDevice_t o_CreateDevice; static Reset_t o_Reset; static Present_t o_Present;
+
+
+/* ---- diagnostics: render target / texture creation (Log=1) ---- */
+typedef HRESULT (WINAPI *CreateTexture_t)(void*, u32, u32, u32, u32, u32, u32, void**, HANDLE*);
+typedef HRESULT (WINAPI *CreateRT_t)(void*, u32, u32, u32, u32, u32, BOOL, void**, HANDLE*);
+static CreateTexture_t o_CreateTexture; static CreateRT_t o_CreateRT;
+static HRESULT WINAPI my_CreateTexture(void *dev, u32 w, u32 h, u32 lv, u32 usage, u32 fmt, u32 pool, void **out, HANDLE *sh) {
+    HRESULT hr = o_CreateTexture(dev, w, h, lv, usage, fmt, pool, out, sh);
+    if ((usage & 1 /*RENDERTARGET*/) || hr < 0) { static int k; if (k < 80) { k++;
+        logs(hr < 0 ? "CreateTexture FAILED" : "CreateTexture RT"); logd(" w", w); logd("  h", h); logx("  fmt", fmt); logx("  usage", usage); logx("  hr", (u32)hr);
+        logx("  caller", (u32)__builtin_return_address(0)); } }
+    return hr;
+}
+static HRESULT WINAPI my_CreateRT(void *dev, u32 w, u32 h, u32 fmt, u32 ms, u32 msq, BOOL lock, void **out, HANDLE *sh) {
+    HRESULT hr = o_CreateRT(dev, w, h, fmt, ms, msq, lock, out, sh);
+    { static int k; if (k < 40) { k++; logs("CreateRenderTarget"); logd(" w", w); logd("  h", h); logx("  fmt", fmt); logx("  hr", (u32)hr); logx("  caller", (u32)__builtin_return_address(0)); } }
+    return hr;
+}
 
 static void apply_vsync(PP *pp) {
     if (!pp || g_vsync < 0) return;
@@ -264,6 +300,10 @@ static HRESULT WINAPI my_CreateDevice(void *d3d, u32 ad, u32 type, HANDLE wnd, u
         if ((p = hook(*out, 16, (void*)my_Reset)))   o_Reset = (Reset_t)p;
         if ((p = hook(*out, 17, (void*)my_Present))) o_Present = (Present_t)p;
         if ((p = hook(*out, 13, (void*)my_CreateASC))) o_CreateASC = (CreateASC_t)p;
+        if (g_log != (HANDLE)-1) {
+            if ((p = hook(*out, 23, (void*)my_CreateTexture))) o_CreateTexture = (CreateTexture_t)p;
+            if ((p = hook(*out, 28, (void*)my_CreateRT))) o_CreateRT = (CreateRT_t)p;
+        }
         if ((p = hook(*out, 14, (void*)my_GetSwapChain))) o_GetSwapChain = (GetSwapChain_t)p;
         if (o_GetSwapChain) { void *sc = 0; if (o_GetSwapChain(*out, 0, &sc) >= 0 && sc) { hook_swap(sc); ((Release_t)(*(void***)sc)[2])(sc); } }
         logx("  device vtbl", (u32)*(void**)*out); logx("  o_Present", (u32)o_Present);
@@ -327,6 +367,46 @@ static __declspec(naked) void stubB(void) { __asm {
     mov  ecx, dword ptr ds:[0xA057F4]
     ret } }
 
+
+/* GUI dialogs (0x5EAEB0): dialog.fovX = dialog.fovY * guiMgr.aspect (aspect clamped to >= 4/3), linear in
+ * degrees -> dialogs such as the in-level MenuBar badge get squeezed horizontally on ultrawide screens.
+ * Same treatment as the main camera: vanilla up to 16:9, Hor+ anchored to the vanilla 16:9 result beyond. */
+static void __cdecl fix_gui(unsigned char *rmod) {
+    float fy = *(float*)(rmod + 0x48), a = *(float*)(*(unsigned char**)0xA05960 + 0x3C), w, t;
+    const float a169 = 16.f / 9.f;
+    w = fy * a;                                               /* vanilla */
+    if (g_wsfov && a > a169 + 0.01f) {
+        float w169 = fy * a169;
+        t = (w169 < 170.f) ? x87_tan(w169 * 0.5f * DEG2RAD) / a169 : x87_tan(fy * 0.5f * DEG2RAD);
+        w = 2.f * x87_atan(t * a) * RAD2DEG;
+    }
+    *(float*)(rmod + 0x44) = w;
+    { static int k; if (k < 12) { k++; logd("GUI dialog fovY x10", (u32)(fy * 10.f)); logd("  aspect x1000", (u32)(a * 1000.f)); logd("  fovX x10", (u32)(w * 10.f)); } }
+}
+/* replaces `fld [eax+48h]; mov edx,[0A05960h]; fmul [edx+3Ch]; fstp [eax+44h]` at 0x5EAEB7 (15 bytes) */
+static __declspec(naked) void stubGui(void) { __asm {
+    pushad
+    push eax
+    call fix_gui
+    add  esp, 4
+    popad
+    ret } }
+static int patch_gui_site(u32 at) {
+    static const unsigned char expect[15] = {0xD9,0x40,0x48,0x8B,0x15,0x60,0x59,0xA0,0x00,0xD8,0x4A,0x3C,0xD9,0x58,0x44};
+    unsigned char *p = (unsigned char*)at; u32 old, tmp; int i;
+    for (i = 0; i < 15; i++) if (p[i] != expect[i]) return 0;
+    VirtualProtect(p, 15, 0x40, &old);
+    p[0] = 0xE8; *(i32*)(p + 1) = (i32)((u32)stubGui - (at + 5));
+    for (i = 5; i < 15; i++) p[i] = 0x90;
+    VirtualProtect(p, 15, old, &tmp);
+    return 1;
+}
+static void install_gui_fix(void) {
+    if (!g_wsfov) return;
+    logd("GUI FOV patch (dialog load)", (u32)patch_gui_site(0x5E9B31));
+    logd("GUI FOV patch (aspect change)", (u32)patch_gui_site(0x5EAEB7));
+}
+
 static int patch_call6(u32 at, const unsigned char *expect, void *target) {
     unsigned char *p = (unsigned char*)at; u32 old, tmp; int i;
     for (i = 0; i < 6; i++) if (p[i] != expect[i]) return 0;
@@ -342,6 +422,278 @@ static void install_fov_fix(void) {
     logd("FOV patch B", (u32)patch_call6(0x4F726A, b, (void*)stubB));
 }
 
+
+/* ---- diagnostics: fullscreen mode validation at startup ----
+ * 0x4412D5: plClient checks (Width,Height,Depth) from graphics.ini against the device record's mode list;
+ * if absent it calls 0x440C90 (write default graphics.ini) at 0x441321. Log the list when that happens. */
+typedef struct { u32 flags; u16 w, h; u32 depth; } MODEREC;   /* 0x20-byte entries, first 12 bytes */
+static void __cdecl log_modecheck(u32 ebp) {
+    u32 n = *(u16*)(ebp - 0x1E8), i; unsigned char *arr = *(unsigned char**)(ebp - 0x1E4);
+    logs("Fullscreen mode not found in device list -> game resets graphics.ini to defaults\r\n");
+    logd("  wanted w", *(u32*)0x991424); logd("  wanted h", *(u32*)0x991428); logd("  wanted depth", *(u32*)0x991430);
+    logd("  device modes", n);
+
+}
+static __declspec(naked) void stubModeCheck(void) { __asm {
+    pushad
+    push ebp
+    call log_modecheck
+    add  esp, 4
+    popad
+    mov  eax, 0x440C90
+    jmp  eax } }
+typedef u32 (WINAPI *GetModeCount_t)(void*, u32, u32);
+typedef HRESULT (WINAPI *EnumModes_t)(void*, u32, u32, u32, void*);
+static GetModeCount_t o_GetModeCount; static EnumModes_t o_EnumModes;
+static u32 WINAPI my_GetModeCount(void *d3d, u32 ad, u32 fmt) {
+    u32 n = o_GetModeCount(d3d, ad, fmt);
+    static int k; if (k < 12) { k++; logx("GetAdapterModeCount fmt", fmt); logd("  count", n); }
+    return n;
+}
+static HRESULT WINAPI my_EnumModes(void *d3d, u32 ad, u32 fmt, u32 i, void *mode) {
+    HRESULT hr = o_EnumModes(d3d, ad, fmt, i, mode);
+
+
+    return hr;
+}
+
+/* ---- fullscreen mode persistence fix ----
+ * At startup plClient (0x4412D5) looks for graphics.ini's (Width,Height,Depth) in the device record's mode
+ * list. That list drops modes wider than 2560 (e.g. 3840x1080, 5120x1440) although D3D supports them, so the
+ * game rewrites graphics.ini with 800x600 defaults. If the requested mode is missing but the adapter supports
+ * it, retarget one record of the same depth (the largest; there are many duplicates) to the requested size. */
+static int d3d_supports(u32 w, u32 h) {
+    typedef void* (WINAPI *fn_t)(u32); fn_t f; void *d3d; u32 n, i; int ok = 0;
+    u32 mode[4];
+    if (!real() || !(f = (fn_t)GetProcAddress(g_real, "Direct3DCreate9")) || !(d3d = f(32))) return 0;
+    n = ((GetModeCount_t)(*(void***)d3d)[6])(d3d, 0, 22 /*X8R8G8B8*/);
+    for (i = 0; i < n && !ok; i++)
+        if (((EnumModes_t)(*(void***)d3d)[7])(d3d, 0, 22, i, mode) >= 0 && mode[0] == w && mode[1] == h) ok = 1;
+    ((Release_t)(*(void***)d3d)[2])(d3d);
+    return ok;
+}
+static void __cdecl fix_modelist(u32 ebp) {
+    u32 n = *(u16*)(ebp - 0x1E8), i, w = *(u32*)0x991424, h = *(u32*)0x991428, depth = *(u32*)0x991430;
+    unsigned char *arr = *(unsigned char**)(ebp - 0x1E4); MODEREC *best = 0;
+    if (!g_modefix || !arr || !n) return;
+    for (i = 0; i < n; i++) { MODEREC *m = (MODEREC*)(arr + i * 0x20); if (m->w == w && m->h == h && m->depth == depth) return; }
+    if (w > 0xFFFF || h > 0xFFFF || !d3d_supports(w, h)) { logs("mode fix: requested mode not supported by D3D, leaving game default\r\n"); return; }
+    for (i = 0; i < n; i++) { MODEREC *m = (MODEREC*)(arr + i * 0x20);
+        if (m->depth == depth && (!best || (u32)m->w * m->h > (u32)best->w * best->h)) best = m; }
+    if (!best) return;
+    logd("mode fix: retargeting record w", best->w); logd("  h", best->h); logd("  to w", w); logd("  to h", h);
+    best->w = (u16)w; best->h = (u16)h;
+}
+static __declspec(naked) void stubModeList(void) { __asm {
+    pushad
+    push ebp
+    call fix_modelist
+    add  esp, 4
+    popad
+    movzx edx, word ptr [ebp-0x1E8]
+    ret } }
+static void install_mode_fix(void) {
+    static const unsigned char expect[7] = {0x0F,0xB7,0x95,0x18,0xFE,0xFF,0xFF};
+    unsigned char *p = (unsigned char*)0x4412D5; u32 old, tmp; int i;
+    if (!g_modefix) return;
+    for (i = 0; i < 7; i++) if (p[i] != expect[i]) return;
+    VirtualProtect(p, 7, 0x40, &old);
+    p[0] = 0xE8; *(i32*)(p + 1) = (i32)((u32)stubModeList - (0x4412D5 + 5)); p[5] = 0x90; p[6] = 0x90;
+    VirtualProtect(p, 7, old, &tmp);
+    logs("fullscreen mode fix installed\r\n");
+}
+
+
+/* ---- mouse camera jump fix ----
+ * WM_MOUSE* handler (0x4A6AA2) decodes lParam as unsigned (movzx / shr 16) and calls the mouse device's
+ * OnMove(x,y) at 0x4A6950, which takes deltas against the last position and, when the cursor leaves the
+ * central 0.3..0.7 band, warps the OS cursor to the window centre (0x4A6690, SetCursorPos).
+ *  - with SetCapture active, positions left/above the window are negative -> read as ~65535 -> huge
+ *    delta in the opposite direction;
+ *  - messages queued before a warp are measured against the new centre -> false jumps.
+ * Fix: feed OnMove the current cursor position (GetCursorPos + ScreenToClient: signed, post-warp). */
+
+/* ---- raw mouse motion (used only to correct the first move after a cursor warp) ----
+ * On some systems the game's warp to the window centre is undone by pending mouse motion: the cursor is
+ * at the centre right after SetCursorPos but the next reading continues from the pre-warp position.
+ * Raw input gives true relative motion regardless of where the cursor ends up. */
+static WNDPROC_t g_origProc; static i32 g_rawDX, g_rawDY; static int g_rawOK, g_warpPending, g_rawAbsLogged;
+static i32 WINAPI my_wndproc(HANDLE h, u32 msg, u32 wp, i32 lp) {
+    if (msg == 0x00FF /*WM_INPUT*/) {
+        unsigned char buf[64]; u32 sz = sizeof(buf);
+        if (GetRawInputData((HANDLE)lp, 0x10000003 /*RID_INPUT*/, buf, &sz, 16) != (u32)-1 && *(u32*)buf == 0 /*RIM_TYPEMOUSE*/) {
+            u16 flags = *(u16*)(buf + 16);
+            if (!(flags & 1)) { g_rawDX += *(i32*)(buf + 28); g_rawDY += *(i32*)(buf + 32); }
+            else if (!g_rawAbsLogged) { g_rawAbsLogged = 1; logs("raw input: mouse reports ABSOLUTE positions (remote/tablet/virtual device?)\r\n"); }
+        }
+    }
+    return CallWindowProcA(g_origProc, h, msg, wp, lp);
+}
+static void raw_init(HANDLE hwnd) {
+    RAWINPUTDEVICE rid; static int tried;
+    if (tried || !hwnd) return; tried = 1;
+    rid.usUsagePage = 1; rid.usUsage = 2; rid.dwFlags = 0; rid.hwndTarget = hwnd;   /* generic desktop / mouse, legacy messages kept */
+    if (!RegisterRawInputDevices(&rid, 1, sizeof(rid))) { logs("raw input: register failed\r\n"); return; }
+    g_origProc = (WNDPROC_t)SetWindowLongA(hwnd, -4 /*GWL_WNDPROC*/, (i32)my_wndproc);
+    g_rawOK = g_origProc != 0;
+    logd("raw input active", (u32)g_rawOK);
+}
+
+/* ---- mouse trace ring buffer (Log=1 only) ---- */
+typedef struct { u32 t; i32 kind, a, b, c, d, e, f; } MEVT;   /* kind 1 = move (raw x,y, cursor x,y, last x,y), 2 = warp (target x,y, ok, after x,y) */
+static MEVT g_ring[32]; static u32 g_ringPos;
+static void ring_add(i32 kind, i32 a, i32 b, i32 c, i32 d, i32 e, i32 f) {
+    MEVT *v = &g_ring[g_ringPos++ & 31]; i64 now; QueryPerformanceCounter(&now);
+    v->t = (u32)udiv64((u64)now * 1000ull, (u64)(g_freq ? g_freq : 1)); v->kind = kind; v->a = a; v->b = b; v->c = c; v->d = d; v->e = e; v->f = f;
+}
+static void logi(const char *label, i32 v) { if (v < 0) { logs(label); logs(" -"); logd("", (u32)-v); } else logd(label, (u32)v); }
+static void ring_dump(void) {
+    u32 i; logs("---- mouse trace (oldest first) ----\r\n");
+    for (i = 0; i < 32; i++) { MEVT *v = &g_ring[(g_ringPos + i) & 31]; if (!v->kind) continue;
+        logd(v->kind == 1 ? "MOVE t_ms" : "WARP t_ms", v->t);
+        if (v->kind == 1) { logi("  raw x", v->a); logi("  raw y", v->b); logi("  cur x", v->c); logi("  cur y", v->d); logi("  last x", v->e); logi("  last y", v->f); }
+        else { logi("  target x", v->a); logi("  target y", v->b); logi("  ok", v->c); logi("  after x", v->d); logi("  after y", v->e); } }
+    logs("------------------------------------\r\n");
+}
+/* replaces `call [SetCursorPos]` at 0x4A6726 (args already pushed: x, y in screen coords) */
+/* The game sets the device's last position to the window centre *before* warping and assumes the warp
+ * worked. On some systems SetCursorPos succeeds but the cursor doesn't move (or is moved straight back),
+ * so the next delta is measured from a centre the cursor never reached -> camera jump.
+ * Fix: after warping, store the cursor's actual position as the last position. */
+static BOOL WINAPI my_SetCursorPos(i32 x, i32 y) {
+    BOOL ok; POINT p; HANDLE hwnd = *(HANDLE*)0xA028AC;
+    g_rawDX = g_rawDY = 0; g_warpPending = 1;
+    ok = SetCursorPos(x, y);
+    p.x = p.y = -99999;
+    if (GetCursorPos(&p) && hwnd && ScreenToClient(hwnd, &p) && g_mousefix) {
+        typedef struct { u32 vtbl; i32 lastX, lastY; } MDEV; MDEV *m = *(MDEV**)0xA028A8;
+        if (m) { m->lastX = p.x; m->lastY = p.y; }
+    }
+    if (g_log != (HANDLE)-1) { POINT t; t.x = x; t.y = y; if (hwnd) ScreenToClient(hwnd, &t); ring_add(2, t.x, t.y, ok, p.x, p.y, 0); }
+    return ok;
+}
+static void *g_pSetCursorPos = (void*)my_SetCursorPos;
+
+
+typedef struct { u32 vtbl; i32 lastX, lastY, w, h; } MOUSEDEV;
+static void __cdecl fix_mouse(i32 *xy) {
+    MOUSEDEV *m = *(MOUSEDEV**)0xA028A8; HANDLE hwnd = *(HANDLE*)0xA028AC;
+    i32 rx = xy[0], ry = xy[1], sx = (short)rx, sy = (short)ry, cx = rx, cy = ry;
+    POINT p;
+    if (g_mousefix && hwnd && GetCursorPos(&p) && ScreenToClient(hwnd, &p)) { cx = p.x; cy = p.y; xy[0] = cx; xy[1] = cy; }
+    if (g_mousefix) {
+        raw_init(hwnd);
+        if (g_warpPending && m) {           /* first move after a warp: delta = true raw motion since the warp */
+            g_warpPending = 0;
+            if (g_rawOK) { m->lastX = cx - g_rawDX; m->lastY = cy - g_rawDY; }
+        }
+        g_rawDX = g_rawDY = 0;
+    }
+    if (g_log != (HANDLE)-1 && m && m->w > 0 && m->h > 0) {
+        i32 dx = cx - m->lastX, dy = cy - m->lastY;           /* delta the game will now see */
+        ring_add(1, sx, sy, cx, cy, m->lastX, m->lastY);
+        if (dx > m->w / 8 || -dx > m->w / 8 || dy > m->h / 8 || -dy > m->h / 8) {
+            static int k; if (k < 8) { k++; logs("LARGE mouse delta after fix\r\n"); logi("  dx", dx); logi("  dy", dy); ring_dump(); } }
+    }
+}
+static __declspec(naked) void stubMouse(void) { __asm {
+    push ecx
+    lea  eax, [esp+8]
+    push eax
+    call fix_mouse
+    add  esp, 4
+    pop  ecx
+    mov  eax, 0x4A6950
+    jmp  eax } }
+static void install_mouse_fix(void) {
+    unsigned char *p = (unsigned char*)0x4A6AB5; u32 old, tmp;
+    if (!g_mousefix && g_log == (HANDLE)-1) return;
+    if (p[0] != 0xE8 || *(i32*)(p + 1) != (i32)(0x4A6950 - (0x4A6AB5 + 5))) { logs("mouse fix: bytes differ, skipped\r\n"); return; }
+    VirtualProtect(p, 5, 0x40, &old);
+    *(i32*)(p + 1) = (i32)((u32)stubMouse - (0x4A6AB5 + 5));
+    VirtualProtect(p, 5, old, &tmp);
+    logd("mouse hook installed, MouseFix", (u32)g_mousefix);
+    {   /* warp fix/trace: retarget `call [0x8A17BC]` (SetCursorPos) at 0x4A6726 to our pointer */
+        unsigned char *q = (unsigned char*)0x4A6726;
+        if (q[0] == 0xFF && q[1] == 0x15 && *(u32*)(q + 2) == 0x8A17BC) {
+            VirtualProtect(q, 6, 0x40, &old); *(u32*)(q + 2) = (u32)&g_pSetCursorPos; VirtualProtect(q, 6, old, &tmp);
+            logs("warp hook installed\r\n"); }
+    }
+}
+
+
+/* ---- diagnostics: GUI text box dynamic text maps (Log=1) ----
+ * pfGUIControlMod::ISetUpDynTextMap (0x603B10): visW/H from control bounds * (pipe W/H, or 1024x768 if
+ * control flag 4), extra = desired - visible, then plDynamicTextMap::Create (0x495230) and SetFont (0x494760). */
+static void __cdecl log_dtm_create(u32 *args, u32 ctrl) {
+    static int k; if (k >= 40) return; k++;
+    logx("DynText Create ctrl", ctrl);
+    logd("  visW", args[0] & 0xFFFF); logd("  visH", args[1] & 0xFFFF); logd("  alpha", args[2] & 0xFF);
+    logd("  extraW", args[3] & 0xFFFF); logd("  extraH", args[4] & 0xFFFF);
+}
+static void __cdecl log_dtm_font(u32 *args) {
+    static int k; if (k >= 40) return; k++;
+    logd("  SetFont size", args[1] & 0xFFFF); logx("  flags", args[2]);
+}
+static __declspec(naked) void stubDtmCreate(void) { __asm {
+    pushad
+    push esi                /* control (this of ISetUpDynTextMap) */
+    lea  eax, [esp+0x28]    /* args: pushad(32) + push(4) + ret(4) */
+    push eax
+    call log_dtm_create
+    add  esp, 8
+    popad
+    mov  eax, 0x495230
+    jmp  eax } }
+static __declspec(naked) void stubDtmFont(void) { __asm {
+    pushad
+    lea  eax, [esp+0x24]
+    push eax
+    call log_dtm_font
+    add  esp, 4
+    popad
+    mov  eax, 0x494760
+    jmp  eax } }
+static void retarget_call(u32 at, u32 expect_target, void *fn) {
+    unsigned char *p = (unsigned char*)at; u32 old, tmp;
+    if (p[0] != 0xE8 || *(i32*)(p + 1) != (i32)(expect_target - (at + 5))) return;
+    VirtualProtect(p, 5, 0x40, &old); *(i32*)(p + 1) = (i32)((u32)fn - (at + 5)); VirtualProtect(p, 5, old, &tmp);
+}
+
+/* ---- resolution-independent GUI text (ScaleText) ----
+ * pfGUIControlMod::ISetUpDynTextMap (0x603B10) sizes each text box's plDynamicTextMap as
+ * (control bounds fraction) x (screen W,H) and draws a fixed-pixel font into it, so text shrinks as the
+ * resolution grows (and narrows on wide screens, since the width fraction doesn't change with aspect).
+ * Controls with flag 4 instead use a fixed 1024x768 virtual size (text scales with the control).
+ * Force that path for all controls; the virtual size is TextReferenceHeight (default 768) at 4:3. */
+static void install_text_fix(void) {
+    unsigned char *j = (unsigned char*)0x603B51, *w = (unsigned char*)0x603B70, *h = (unsigned char*)0x603B75; u32 old, tmp;
+    if (!g_scaletext) return;
+    if (j[0] != 0x75 || j[1] != 0x1D || w[0] != 0xBF || *(u32*)(w + 1) != 0x400 || h[0] != 0xBB || *(u32*)(h + 1) != 0x300) { logs("text fix: bytes differ, skipped\r\n"); return; }
+    VirtualProtect(j, 0x30, 0x40, &old);
+    j[0] = 0xEB;                                              /* jne -> jmp: always use the virtual size */
+    *(u32*)(h + 1) = (u32)g_textref;
+    *(u32*)(w + 1) = (u32)((g_textref * 4 + 1) / 3);
+    VirtualProtect(j, 0x30, old, &tmp);
+    logd("text fix installed, reference height", (u32)g_textref);
+}
+
+static void install_text_diag(void) {
+    if (g_log == (HANDLE)-1) return;
+    retarget_call(0x603C13, 0x495230, (void*)stubDtmCreate);
+    retarget_call(0x603C7E, 0x494760, (void*)stubDtmFont);
+    logs("text diag installed\r\n");
+}
+
+static void install_diag(void) {
+    unsigned char *p = (unsigned char*)0x441321; u32 old, tmp;
+    if (g_log == (HANDLE)-1) return;
+    if (p[0] != 0xE8 || *(i32*)(p + 1) != (i32)(0x440C90 - (0x441321 + 5))) return;
+    VirtualProtect(p, 5, 0x40, &old);
+    *(i32*)(p + 1) = (i32)((u32)stubModeCheck - (0x441321 + 5));
+    VirtualProtect(p, 5, old, &tmp);
+}
+
 /* ---- exports ---- */
 void* WINAPI Direct3DCreate9(u32 sdk) {
     typedef void* (WINAPI *fn_t)(u32); fn_t f; void *d3d, *p;
@@ -349,6 +701,10 @@ void* WINAPI Direct3DCreate9(u32 sdk) {
     d3d = f(sdk);
     logx("Direct3DCreate9 sdk", sdk); logx("  d3d", (u32)d3d);
     if (d3d && (p = hook(d3d, 16, (void*)my_CreateDevice))) o_CreateDevice = (CreateDevice_t)p;
+    if (d3d && g_log != (HANDLE)-1) {
+        if ((p = hook(d3d, 6, (void*)my_GetModeCount))) o_GetModeCount = (GetModeCount_t)p;
+        if ((p = hook(d3d, 7, (void*)my_EnumModes))) o_EnumModes = (EnumModes_t)p;
+    }
     return d3d;
 }
 HRESULT WINAPI Direct3DCreate9Ex(u32 sdk, void **out) {
@@ -369,6 +725,6 @@ void WINAPI D3DPERF_SetOptions(u32 o) { typedef void (WINAPI *fn_t)(u32); fn_t f
 
 BOOL WINAPI DllMain(HMODULE h, u32 reason, PVOID r) {
     (void)r;
-    if (reason == 1) { g_self = h; DisableThreadLibraryCalls(h); load_config(); install_fov_fix(); install_present_hook(); }
+    if (reason == 1) { g_self = h; DisableThreadLibraryCalls(h); load_config(); install_fov_fix(); install_gui_fix(); install_present_hook(); install_mode_fix(); install_mouse_fix(); install_text_fix(); install_text_diag(); install_diag(); }
     return 1;
 }

@@ -1,0 +1,9 @@
+LIBRARY user32.dll
+EXPORTS
+GetCursorPos@4
+ScreenToClient@8
+SetCursorPos@8
+RegisterRawInputDevices@12
+GetRawInputData@20
+SetWindowLongA@12
+CallWindowProcA@20

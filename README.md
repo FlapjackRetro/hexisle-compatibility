@@ -11,7 +11,11 @@ on modern Windows. You need your own copy of the game disc; no game files are in
 | ~0.25 fps | Main loop calls `0x443D20` every frame; with no joystick open it re-runs `DirectInput8Create` + `EnumDevices(GAMECTRL)` (and leaks the objects) — seconds per frame on HID-heavy PCs | `tools/patch_plasma.ps1` / `.py`: `je`→`jmp` at file offset `0x43D2D` (startup enumeration kept) |
 | No frame cap / VSync control | Engine has `Graphics.EnableVSync` but no limiter | `hexfix` d3d9.dll proxy (optional, off by default) |
 | Broken view on ultrawide (21:9, 32:9) | Horizontal FOV is `52.5° × aspect` (−3.3° above 80°) at `0x443293`/`0x4F7242`: 90° at 16:9 but ~183° at 32:9 | `hexfix` `WidescreenFOV=1`: vanilla up to 16:9, Hor+ beyond (21:9 ≈ 106°, 32:9 ≈ 127°) |
-| Glow turns the scene white at 5120×1440 | Under investigation | Untick **Glow** in Settings → Video for now |
+| Squeezed GUI (e.g. in-level badge) on ultrawide | GUI dialogs use `fovX = fovY × max(aspect, 4/3)` (linear in degrees) at `0x5E9B31` (dialog load) and `0x5EAEB7` (aspect change) | `hexfix` `WidescreenFOV=1`: same Hor+ treatment as the 3D camera |
+| Wide fullscreen modes (3840×1080, 5120×1440) reset to 800×600 on restart | Startup check (`0x4412D5`) looks for graphics.ini's mode in the device record, whose mode list omits modes wider than 2560 although D3D reports them (the Settings menu reads a different, complete list) | `hexfix` `KeepWideModes=1`: if D3D supports the saved mode, a duplicate record of the same depth is retargeted to it |
+| Mouse camera occasionally leaps | While steering, the mouse device (`0x4A6950`) sets its last position to the window centre and warps the cursor there (`0x4A6690`) whenever it leaves the 0.3–0.7 band. Queued `WM_MOUSEMOVE`s from before the warp, and (on some systems) the warp being undone by in-flight motion, are then measured against a centre the cursor isn't at. `lParam` is also decoded unsigned (`0x4A6AA2`) | `hexfix` `MouseFix=1`: feed the device the real cursor position, and correct the first move after each warp with raw-input motion |
+| GUI text boxes tiny at high resolutions, and stale after a resolution change | `pfGUIControlMod::ISetUpDynTextMap` (`0x603B10`) sizes each text box's `plDynamicTextMap` as bounds × screen size and draws a fixed-pixel font into it (text shrinks as resolution grows); the maps are only built when a dialog loads. The engine's resolution-independent path (control flag 4 → 1024×768 virtual size) is unused | `hexfix` `ScaleText=1`: force the virtual-size path for all controls (`jne`→`jmp` at `0x603B51`); reference height configurable |
+| Lighting Glow turned the scene white on ultrawide | Side effect of the >180° FOV above (bloom from near geometry stretched across the screen); the bloom render targets themselves are created correctly at 5120×1440 | Fixed by `WidescreenFOV=1` |
 
 ## Install
 1. Copy the disc contents into this folder (so `plInstaller.exe` and `Cosmic Osmo's Hex Isle.app\` sit next to this README).
@@ -45,9 +49,9 @@ Note that the game does not read `InstallPath`, so the entry works regardless of
 ## hexfix (d3d9.dll proxy)
 Loaded from the game folder in place of the system `d3d9.dll` (the game `LoadLibrary`s `D3D9.DLL`); forwards to
 `System32\d3d9.dll`. It hooks `IDirect3D9::CreateDevice` and `IDirect3DDevice9::Reset` (VSync override), and
-redirects the game's single `IDirect3DDevice9::Present` call site (`0x4F4285`) — the D3D9 runtime can swap a
+subclasses the game window for raw mouse input, and redirects the game's single `IDirect3DDevice9::Present` call site (`0x4F4285`) — the D3D9 runtime can swap a
 device's vtable at runtime (observed when a level loads), so vtable hooks on `Present` alone are not reliable.
-The FOV fix patches two call sites in `plasma.exe` at load time. All patches verify the original bytes first.
+The FOV, GUI-FOV, mode-list and text fixes patch call sites in `plasma.exe` at load time. All patches verify the original bytes first.
 
 Settings in `hexfix.ini`:
 
@@ -55,7 +59,11 @@ Settings in `hexfix.ini`:
 |---|---|---|---|
 | `Display` | `FrameRateLimit` | `0` | FPS cap, 0 = off (vanilla) |
 | `Display` | `VSync` | `-1` | -1 = game's setting (vanilla), 0 = force off, 1 = force on |
-| `Display` | `WidescreenFOV` | `1` | 1 = Hor+ FOV wider than 16:9 (unchanged at ≤16:9), 0 = original formula |
+| `Display` | `WidescreenFOV` | `1` | 1 = Hor+ FOV for the 3D camera and GUI dialogs wider than 16:9 (unchanged at ≤16:9), 0 = original formulas |
+| `Display` | `KeepWideModes` | `1` | 1 = keep a saved fullscreen mode the startup list omits (if D3D supports it), 0 = original reset to defaults |
+| `Display` | `ScaleText` | `1` | 1 = resolution-independent GUI text, 0 = original (text shrinks at high resolutions) |
+| `Display` | `TextReferenceHeight` | `768` | virtual layout height for `ScaleText` (width = ×4/3); lower = bigger text |
+| `Input` | `MouseFix` | `1` | 1 = mouse camera jump fix (real cursor position + raw-input correction after warps), 0 = original |
 | `Debug` | `ShowFPS` | `0` | 1 = FPS counter (green digits, top-left) |
 | `Debug` | `Log` | `0` | 1 = write `hexfix.log` next to the game |
 

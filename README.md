@@ -36,7 +36,7 @@ The value is your CD key, obfuscated by the installer (base-36, character-wise s
 repository** — use the one printed in your own copy. Alternatives:
 
 * run the disc's `plInstaller.exe` as Administrator and enter your CD key there, or
-* import the registry fix Cyan Worlds provides for this error (`install_hexisle.bat path\to\fix.reg`).
+* import a registry fix Cyan Worlds provides for this error (`install_hexisle.bat path\to\fix.reg`).
 
 Note that the game does not read `InstallPath`, so the entry works regardless of where the game is installed.
 

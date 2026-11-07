@@ -1,0 +1,16 @@
+LIBRARY kernel32.dll
+EXPORTS
+LoadLibraryW@4
+GetProcAddress@8
+GetSystemDirectoryW@8
+GetModuleFileNameW@12
+VirtualProtect@16
+QueryPerformanceCounter@4
+QueryPerformanceFrequency@4
+CreateWaitableTimerExW@16
+SetWaitableTimer@24
+WaitForSingleObject@8
+GetPrivateProfileIntW@16
+DisableThreadLibraryCalls@4
+Sleep@4
+OutputDebugStringA@4

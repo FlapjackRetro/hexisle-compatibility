@@ -1,0 +1,13 @@
+# Whitelist: only our own work is tracked. The disc contents in this folder are not.
+/*
+!/.gitignore
+!/.gitattributes
+!/README.md
+!/install_hexisle.bat
+!/tools/
+!/hexfix/
+/hexfix/*.obj
+/hexfix/*.lib
+/hexfix/*.exp
+/hexfix/*.dll
+/hexisle.bundle

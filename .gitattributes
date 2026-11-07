@@ -1,0 +1,4 @@
+*.bat text eol=crlf
+*.reg text eol=crlf
+*.ini text eol=crlf
+*.sh  text eol=lf

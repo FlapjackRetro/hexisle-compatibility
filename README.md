@@ -19,7 +19,8 @@ on modern Windows. You need your own copy of the game disc; no game files are in
 
 ## Install
 1. Copy the disc contents into this folder (so `plInstaller.exe` and `Cosmic Osmo's Hex Isle.app\` sit next to this README).
-2. Optional: build `hexfix` (`hexfix\build.bat`) if you want the frame cap / VSync options.
+2. Recommended: build `hexfix` (`hexfix\build.bat`). It carries the widescreen, text, mouse and
+   resolution fixes as well as the frame cap / VSync options (see [hexfix](#hexfix-d3d9dll-proxy)).
 3. Run `install_hexisle.bat` **as Administrator**:
    * `install_hexisle.bat` — asks for the CD key printed in your game case
    * `install_hexisle.bat <CDKEY>` — same, non-interactive
@@ -67,7 +68,16 @@ Settings in `hexfix.ini`:
 | `Debug` | `ShowFPS` | `0` | 1 = FPS counter (green digits, top-left) |
 | `Debug` | `Log` | `0` | 1 = write `hexfix.log` next to the game |
 
-Build: `hexfix\build.bat` (MSVC x86 Native Tools prompt) or `hexfix/build.sh` (clang-cl + lld-link, no SDK needed).
+### Building and installing hexfix
+1. Build: `hexfix\build.bat` (MSVC, from an **x86** Native Tools Command Prompt) or `hexfix/build.sh`
+   (clang-cl + lld-link, no SDK needed). Either produces `hexfix\d3d9.dll`.
+2. Copy **both** `hexfix\d3d9.dll` and `hexfix\hexfix.ini` into the game folder, next to `plasma.exe`
+   (`C:\Cosmo` if you used `install_hexisle.bat`).
+
+`install_hexisle.bat` does step 2 for you if `hexfix\d3d9.dll` has been built, but it never overwrites an
+existing `hexfix.ini`. When updating, copy the new `hexfix.ini` over by hand (or merge your settings into it)
+so newly added options are listed. Missing keys fall back to the defaults above.
+To uninstall hexfix, delete `d3d9.dll` and `hexfix.ini` from the game folder.
 
 ## Notes for hacking
 * Settings/saves: `%LOCALAPPDATA%\Hexisle\` (`init\graphics.ini`, `init\audio.ini`, `sav\`, `player.hex`).

@@ -8,15 +8,19 @@ on modern Windows. You need your own copy of the game disc; no game files are in
 |---|---|---|
 | "Your CD key is missing or invalid" | `plasma.exe` reads a value the installer derives from your CD key | See [CD key](#cd-key) |
 | Installer not needed | Game files live in the Mac Cider wrapper on the hybrid disc | `install_hexisle.bat` copies them to `C:\Cosmo` |
-| ~0.25 fps | Main loop calls `0x443D20` every frame; with no joystick open it re-runs `DirectInput8Create` + `EnumDevices(GAMECTRL)` (and leaks the objects) — seconds per frame on HID-heavy PCs | `tools/patch_plasma.py`: `je`→`jmp` at file offset `0x43D2D` (startup enumeration kept) |
+| ~0.25 fps | Main loop calls `0x443D20` every frame; with no joystick open it re-runs `DirectInput8Create` + `EnumDevices(GAMECTRL)` (and leaks the objects) — seconds per frame on HID-heavy PCs | `tools/patch_plasma.ps1` / `.py`: `je`→`jmp` at file offset `0x43D2D` (startup enumeration kept) |
 | No frame cap / VSync control | Engine has `Graphics.EnableVSync` but no limiter | `hexfix` d3d9.dll proxy (optional, off by default) |
 
 ## Install
 1. Copy the disc contents into this folder (so `plInstaller.exe` and `Cosmic Osmo's Hex Isle.app\` sit next to this README).
-2. Run `install_hexisle.bat` **as Administrator** — copies the game to `C:\Cosmo`. If you have Cyan's registry fix,
-   pass it as an argument: `install_hexisle.bat path\to\fix.reg`. The script warns if the CD-key entry is missing.
-3. `python tools\patch_plasma.py C:\Cosmo\plasma.exe` — fixes the frame rate (writes `plasma.exe.bak`).
-4. Optional: build `hexfix` and copy `d3d9.dll` + `hexfix.ini` next to `plasma.exe`.
+2. Optional: build `hexfix` (`hexfix\build.bat`) if you want the frame cap / VSync options.
+3. Run `install_hexisle.bat` **as Administrator**:
+   * `install_hexisle.bat` — asks for the CD key printed in your game case
+   * `install_hexisle.bat <CDKEY>` — same, non-interactive
+   * `install_hexisle.bat path\to\fix.reg` — imports a registry fix obtained from Cyan instead
+
+   It copies the game to `C:\Cosmo`, writes the CD-key registry entry, patches `plasma.exe`
+   (original kept as `plasma.exe.orig`), installs hexfix if built, and creates a desktop shortcut.
 
 ## CD key
 On startup `plasma.exe` checks a registry value that the original installer (`plInstaller.exe`) writes from your CD key:
@@ -27,11 +31,12 @@ HKLM\SOFTWARE\WOW6432Node\Cyan Worlds, Inc.\Installer\{B9E0F969-021D-4037-B3E8-E
 ```
 
 If it is missing or wrong the game exits with "Your CD key is missing or invalid, please re-install."
-This repository does **not** include the value. To create it, either:
+The value is your CD key, obfuscated by the installer (base-36, character-wise shift by a fixed mask).
+`tools/set_cdkey.ps1` performs the same encoding from the key you enter. **No CD key is included in this
+repository** — use the one printed in your own copy. Alternatives:
 
-* run the disc's `plInstaller.exe` as Administrator and enter the CD key from your copy, or
-* request the registry fix Cyan Worlds provides for this error from Cyan support and import it
-  (or pass it to `install_hexisle.bat`).
+* run the disc's `plInstaller.exe` as Administrator and enter your CD key there, or
+* import the registry fix Cyan Worlds provides for this error (`install_hexisle.bat path\to\fix.reg`).
 
 Note that the game does not read `InstallPath`, so the entry works regardless of where the game is installed.
 
